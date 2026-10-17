@@ -165,8 +165,29 @@ def inr(x):
 
 
 # ================================================================ PAGE 1: overall
+TEAM = ["Pooja Karwa", "Samridhi Aggarwal", "Sriyanshu Mishra"]
+INSTITUTE = "Great Lakes Institute of Management (GLIM), Chennai"
+
+
+def show_credits():
+    """Project credit under the page title and at the top of the sidebar."""
+    st.markdown(
+        f"<div style='margin:-0.6rem 0 0.8rem 0;font-size:0.95rem;opacity:0.85'>"
+        f"A project by <b>{', '.join(TEAM[:-1])} &amp; {TEAM[-1]}</b> · {INSTITUTE}</div>",
+        unsafe_allow_html=True,
+    )
+    with st.sidebar:
+        st.markdown(
+            "<div style='padding:0.6rem 0.8rem;border-radius:0.5rem;border:1px solid rgba(128,128,128,0.35);"
+            "font-size:0.85rem;line-height:1.5'><b>Project team</b><br>" + "<br>".join(TEAM) +
+            f"<br><span style='opacity:0.75'>GLIM Chennai</span></div>",
+            unsafe_allow_html=True,
+        )
+
+
 def page_overall():
     st.title("🍛 Hostel Mess Food Waste Forecaster")
+    show_credits()
     st.caption(
         "Forecast food waste with machine learning, then turn it into money: what waste costs the mess, "
         "whether a waste-reduction investment pays off (NPV, IRR, payback), and how the mess performs "
@@ -267,8 +288,9 @@ def page_overall():
     waste_per_student_yr = annual_waste_cost / students
     grams_per_student_day = daily_fc * 1000 / students
 
-    tab_fc, tab_fin, tab_inv, tab_bud, tab_how = st.tabs(
-        ["📈 Forecast", "💰 Cost of waste", "🏦 Investment appraisal", "🎯 Budget & variance", "ℹ️ Method"]
+    tab_fc, tab_fin, tab_inv, tab_bud, tab_rec, tab_how = st.tabs(
+        ["📈 Forecast", "💰 Cost of waste", "🏦 Investment appraisal", "🎯 Budget & variance",
+         "💡 Recommendations", "ℹ️ Method"]
     )
 
     # ================================================================ TAB 1: forecast
@@ -511,6 +533,120 @@ def page_overall():
         st.dataframe(bt, width="stretch")
 
     # ================================================================ TAB 5: method
+    # ================================================================ TAB 5: recommendations
+    with tab_rec:
+        st.subheader("Recommendations")
+        st.caption("Generated from your data and the inputs on the other tabs, using fixed rules (thresholds listed "
+                   "at the bottom). They point to where to act, and still need the mess manager's judgement.")
+        recs = []   # (priority 1 high / 2 medium / 3 good news, text)
+
+        # 1. weekday pattern -> batch sizing
+        others = dow_avg.drop(dow_avg.idxmax()).mean()
+        if others > 0 and dow_avg.max() >= 1.15 * others:
+            extra = dow_avg.max() - others
+            yr_save = extra * (days_yr / 7) * cost_per_kg
+            recs.append((1 if extra / others >= 0.3 else 2,
+                         f"**Cook less on {peak}s.** Waste averages {dow_avg.max():.1f} kg on {peak}s vs "
+                         f"{others:.1f} kg on other days, likely because fewer students eat in. Cutting the {peak} "
+                         f"batch to bring waste back to normal would save about {inr(yr_save)} a year."))
+
+        # 2. recent trend
+        last14, prev14 = s.iloc[-14:].mean(), s.iloc[-28:-14].mean()
+        if prev14 > 0:
+            chg = (last14 / prev14 - 1) * 100
+            if chg >= 10:
+                recs.append((1 if chg >= 25 else 2,
+                             f"**Waste is rising:** up {chg:.0f}% in the last two weeks ({prev14:.1f} → {last14:.1f} kg/day). "
+                             "Check for menu changes, food quality complaints or a drop in attendance."))
+            elif chg <= -10:
+                recs.append((3, f"**Waste is falling:** down {abs(chg):.0f}% in the last two weeks "
+                                f"({prev14:.1f} → {last14:.1f} kg/day). Find out what changed and keep doing it."))
+
+        # 3. forecast direction
+        f_chg = (daily_fc / last14 - 1) * 100 if last14 > 0 else 0
+        if f_chg >= 10:
+            recs.append((2, f"**Expect more waste ahead:** the forecast averages {daily_fc:.1f} kg/day, {f_chg:.0f}% "
+                            f"above the last two weeks. Plan smaller batches for the next {horizon} days."))
+
+        # 4. budget variance
+        if n_adv > horizon / 2:
+            recs.append((1, f"**Over the waste budget:** the forecast misses the {target:.1f} kg/day target on "
+                            f"{n_adv} of {horizon} days (adverse variance {inr(abs(tot_var))}). Reaching it needs about "
+                            f"{max(0.0, daily_fc - target):.1f} kg/day less waste."))
+        elif n_adv == 0:
+            recs.append((3, f"**On budget:** the forecast stays within the {target:.1f} kg/day target on every day. "
+                            "Consider setting a tighter target."))
+
+        # 5. investment decision
+        if p_npv > 0:
+            recs.append((1 if p_npv > capex else 2,
+                         f"**Invest in '{proj}'.** At your assumptions it has NPV {inr(p_npv)}"
+                         + (f", IRR {p_irr * 100:.1f}%" if p_irr is not None else "")
+                         + (f" and pays back in {p_pb:.1f} years" if p_pb is not None else "")
+                         + (f". It stays worthwhile as long as it cuts waste by at least {be * 100:.1f}%."
+                            if np.isfinite(be) and 0 <= be <= 1 else ".")
+                         + " Verify the cost and reduction assumptions with a real vendor quote before committing."))
+        else:
+            recs.append((2, f"**Don't invest in '{proj}' at these assumptions:** NPV is {inr(p_npv)}. "
+                            + (f"It would need to cut waste by at least {be * 100:.1f}% to break even. "
+                               if np.isfinite(be) and 0 <= be <= 1 else "")
+                            + "Try a cheaper option, such as portion control or pre-booking via a free form."))
+
+        # 6. scale of the problem
+        if np.isfinite(waste_pct_rev) and waste_pct_rev >= 5:
+            recs.append((1, f"**Waste is a material cost:** about {waste_pct_rev:.1f}% of mess fee revenue "
+                            f"({inr(annual_waste_cost)} a year, {inr(waste_per_student_yr)} per student). "
+                            "Report it monthly to the mess committee as a key metric."))
+        else:
+            recs.append((3, f"**Waste cost is {waste_pct_rev:.1f}% of mess fee revenue** ({inr(annual_waste_cost)} a year). "
+                            "Still worth tracking monthly so it doesn't creep up."))
+
+        # 7. volatility -> pre-booking
+        r30 = s.iloc[-30:]
+        cv = r30.std() / r30.mean() if r30.mean() > 0 else 0
+        if cv >= 0.25:
+            recs.append((2, f"**Waste is unpredictable** (it varies by {cv * 100:.0f}% around its average). "
+                            "A meal pre-booking or opt-out system would tell the kitchen how many will eat each day."))
+
+        # 8. spike days
+        z = (s - s.rolling(28, min_periods=7).mean()) / s.rolling(28, min_periods=7).std()
+        spikes = z[z >= 2].sort_values(ascending=False).head(3)
+        if len(spikes):
+            days_txt = ", ".join(f"{d:%d %b} ({s[d]:.0f} kg)" for d in spikes.index)
+            recs.append((2, f"**Unusual spike days:** {days_txt}. Check what happened (fests, special meals, exams, "
+                            "holidays). If they recur, plan for them in advance."))
+
+        # 9. risk buffer
+        recs.append((3, f"**Risk buffer:** budget for up to {inr(war_kg * cost_per_kg)} of waste over the next "
+                        f"{horizon} days (95% Waste-at-Risk), {inr((war_kg - fc.sum()) * cost_per_kg)} above the expected cost."))
+
+        # 10. forecast reliability
+        if scores.loc[best, "Error %"] >= 15:
+            recs.append((2, f"**Forecast is rough** ({scores.loc[best, 'Error %']}% error). Recording daily headcount "
+                            "and the menu alongside waste would make predictions much sharper."))
+
+        labels = {1: ("🔴 High priority", st.error), 2: ("🟠 Medium priority", st.warning),
+                  3: ("🟢 Good news & monitoring", st.success)}
+        for p in (1, 2, 3):
+            group = [r for r in recs if r[0] == p]
+            if group:
+                st.markdown(f"#### {labels[p][0]}")
+                for _, txt in group:
+                    labels[p][1](txt)
+
+        st.markdown("#### Also look at")
+        st.info("For dish-level advice (which items to cut and how much to cook), open **Item-wise forecast** "
+                "in the sidebar and upload item-level records.")
+        with st.expander("Rule thresholds"):
+            st.markdown("- Weekday problem: one weekday ≥ 1.15× the other days' average (high priority if ≥ 1.3×)\n"
+                        "- Trend: last 2 weeks vs previous 2 weeks, ±10% (high priority if ≥ +25%)\n"
+                        "- Over budget: forecast misses the target on more than half the days\n"
+                        "- Material cost: waste ≥ 5% of mess fee revenue\n"
+                        "- Unpredictable: coefficient of variation over the last 30 days ≥ 25%\n"
+                        "- Spike day: ≥ 2 standard deviations above the 28-day rolling average\n"
+                        "- Rough forecast: model error ≥ 15%\n\n"
+                        "These cut-offs are judgement calls, not industry standards. Adjust them in the code if needed.")
+
     with tab_how:
         st.markdown(
             """
@@ -657,6 +793,7 @@ def item_forecast(s, served_dow, horizon):
 
 def page_items():
     st.title("🥘 Item-wise Waste Forecast")
+    show_credits()
     st.caption("Upload waste records per dish. The app finds every item in your file, forecasts each one, "
                "ranks where the money is going, and recommends how much to cook.")
 
